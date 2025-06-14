@@ -1,63 +1,77 @@
+import os
 import sys
 import subprocess
-
-# Check if scikit-learn is installed
-try:
-    import sklearn
-except ImportError:
-    print("[INFO] Installing required module: scikit-learn")
-    # Use python.exe to avoid permission issues with pythonw.exe
-    subprocess.check_call([sys.executable.replace('w', ''), "-m", "pip", "install", "scikit-learn"])
-
-from collections.abc import Iterable
 import numpy as np
 import imutils
 import pickle
 import time
 import cv2
 import csv
+from collections.abc import Iterable
 
-def flatten(lis):
-    for item in lis:
-        if isinstance(item, Iterable) and not isinstance(item, str):
-            for x in flatten(item):
-                yield x
-        else:
-            yield item
+# === Install scikit-learn if missing ===
+try:
+    import sklearn
+except ImportError:
+    print("[INFO] Installing required module: scikit-learn")
+    subprocess.check_call([sys.executable.replace('w', ''), "-m", "pip", "install", "scikit-learn"])
 
+# === CONFIGURATION ===
+embeddingModel = os.path.join(os.getcwd(), "openface_nn4.small2.v1.t7")
 embeddingFile = "output/embeddings.pickle"
-embeddingModel = "openface_nn4.small2.v1.t7"
 recognizerFile = "output/recognizer.pickle"
 labelEncFile = "output/le.pickle"
-conf = 0.5
+csvFilePath = "student.csv"
+confidenceThreshold = 0.5
 
-print("[INFO] loading face detector...")
-prototxt = "model/model/deploy.prototxt"
-model = "model/model/res10_300x300_ssd_iter_140000.caffemodel"
+# === VERIFY FILES EXIST ===
+for file_path in [embeddingModel, embeddingFile, recognizerFile, labelEncFile, csvFilePath]:
+    if not os.path.exists(file_path):
+        print(f"[ERROR] File not found: {file_path}")
+        sys.exit(1)
+
+# === LOAD MODELS ===
+print("[INFO] Loading face detector...")
+prototxt = "model/deploy.prototxt"
+model = "model/res10_300x300_ssd_iter_140000.caffemodel"
 detector = cv2.dnn.readNetFromCaffe(prototxt, model)
 
-print("[INFO] loading face recognizer...")
+print("[INFO] Loading face embedder...")
 embedder = cv2.dnn.readNetFromTorch(embeddingModel)
 
-# Load the trained face recognizer and label encoder
+print("[INFO] Loading recognizer and label encoder...")
 with open(recognizerFile, "rb") as f:
-    recognizer = pickle.loads(f.read())
+    recognizer = pickle.load(f)
 with open(labelEncFile, "rb") as f:
-    le = pickle.loads(f.read())
+    le = pickle.load(f)
 
-Roll_Number = ""
-box = []
-print("[INFO] starting video stream...")
+# === LOAD STUDENT DATA ===
+print("[INFO] Loading student records...")
+students = {}
+with open(csvFilePath, "r") as f:
+    reader = csv.reader(f)
+    for row in reader:
+        if len(row) >= 2:
+            students[row[0]] = row[1]  # name -> roll number
+
+# === START VIDEO STREAM ===
+print("[INFO] Starting video stream...")
 cam = cv2.VideoCapture(0)
-time.sleep(1.0)
+time.sleep(2.0)
 
 while True:
-    _, frame = cam.read()
+    ret, frame = cam.read()
+    if not ret:
+        print("[WARNING] Frame capture failed.")
+        break
+
     frame = imutils.resize(frame, width=600)
     (h, w) = frame.shape[:2]
+
     imageBlob = cv2.dnn.blobFromImage(
         cv2.resize(frame, (300, 300)), 1.0, (300, 300),
-        (104.0, 177.0, 123.0), swapRB=False, crop=False)
+        (104.0, 177.0, 123.0), swapRB=False, crop=False
+    )
 
     detector.setInput(imageBlob)
     detections = detector.forward()
@@ -65,17 +79,17 @@ while True:
     for i in range(0, detections.shape[2]):
         confidence = detections[0, 0, i, 2]
 
-        if confidence > conf:
+        if confidence > confidenceThreshold:
             box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
             (startX, startY, endX, endY) = box.astype("int")
 
             face = frame[startY:endY, startX:endX]
             (fH, fW) = face.shape[:2]
-
             if fW < 20 or fH < 20:
                 continue
 
-            faceBlob = cv2.dnn.blobFromImage(face, 1.0 / 255, (96, 96), (0, 0, 0), swapRB=True, crop=False)
+            faceBlob = cv2.dnn.blobFromImage(face, 1.0 / 255, (96, 96), (0, 0, 0),
+                                             swapRB=True, crop=False)
             embedder.setInput(faceBlob)
             vec = embedder.forward()
 
@@ -83,37 +97,17 @@ while True:
             j = np.argmax(preds)
             proba = preds[j]
             name = le.classes_[j]
+            roll = students.get(name, "Unknown")
 
-            # Load CSV data and match with recognized name
-            with open('student.csv', 'r') as csvFile:
-                reader = csv.reader(csvFile)
-                box = []
-                for row in reader:
-                    box = np.append(box, row)
-                    name = str(name)
-                    if name in row:
-                        person = str(row)
-                        print(name)
-                listString = str(box)
-                print(box)
-                if name in listString:
-                    singleList = list(flatten(box))
-                    listlen = len(singleList)
-                    print("listlen", listlen)
-                    Index = singleList.index(name)
-                    print("Index", Index)
-                    name = singleList[Index]
-                    Roll_Number = singleList[Index + 1]
-                    print(Roll_Number)
-
-            text = "{} : {} : {:.2f}%".format(name, Roll_Number, proba * 100)
+            text = f"{name} : {roll} : {proba * 100:.2f}%"
             y = startY - 10 if startY - 10 > 10 else startY + 10
             cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 0, 255), 2)
-            cv2.putText(frame, text, (startX, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
+            cv2.putText(frame, text, (startX, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 2)
 
-    cv2.imshow("Frame", frame)
+    cv2.imshow("Face Recognition", frame)
     key = cv2.waitKey(1) & 0xFF
-    if key == 27:  # Press 'Esc' to exit
+    if key == 27:
         break
 
 cam.release()
