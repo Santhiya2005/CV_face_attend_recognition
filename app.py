@@ -2,7 +2,6 @@ from flask import Flask, render_template, Response
 import cv2
 import numpy as np
 import pickle
-import time
 import os
 
 app = Flask(__name__)
@@ -17,7 +16,7 @@ with open("output/recognizer.pickle", "rb") as f:
 with open("output/le.pickle", "rb") as f:
     le = pickle.load(f)
 
-# Camera
+# Open camera or video file (use 0 for webcam locally)
 cam = cv2.VideoCapture(0)
 
 def generate_frames():
@@ -25,59 +24,61 @@ def generate_frames():
         success, frame = cam.read()
         if not success:
             break
-        else:
-            frame = cv2.resize(frame, (600, 400))
-            (h, w) = frame.shape[:2]
 
-            imageBlob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0,
-                                              (300, 300), (104.0, 177.0, 123.0),
-                                              swapRB=False, crop=False)
+        frame = cv2.resize(frame, (600, 400))
+        (h, w) = frame.shape[:2]
 
-            detector.setInput(imageBlob)
-            detections = detector.forward()
+        imageBlob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0,
+                                          (300, 300), (104.0, 177.0, 123.0),
+                                          swapRB=False, crop=False)
 
-            for i in range(detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
-                if confidence > 0.5:
-                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                    (startX, startY, endX, endY) = box.astype("int")
+        detector.setInput(imageBlob)
+        detections = detector.forward()
 
-                    face = frame[startY:endY, startX:endX]
-                    if face.shape[0] < 20 or face.shape[1] < 20:
-                        continue
+        for i in range(detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence > 0.5:
+                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                (startX, startY, endX, endY) = box.astype("int")
 
-                    faceBlob = cv2.dnn.blobFromImage(face, 1.0 / 255,
-                                                     (96, 96), (0, 0, 0),
-                                                     swapRB=True, crop=False)
-                    embedder.setInput(faceBlob)
-                    vec = embedder.forward()
+                face = frame[startY:endY, startX:endX]
+                if face.shape[0] < 20 or face.shape[1] < 20:
+                    continue
 
-                    preds = recognizer.predict_proba(vec)[0]
-                    j = np.argmax(preds)
-                    proba = preds[j]
-                    name = le.classes_[j]
+                faceBlob = cv2.dnn.blobFromImage(face, 1.0 / 255,
+                                                 (96, 96), (0, 0, 0),
+                                                 swapRB=True, crop=False)
+                embedder.setInput(faceBlob)
+                vec = embedder.forward()
 
-                    text = f"{name}: {proba*100:.2f}%"
-                    y = startY - 10 if startY - 10 > 10 else startY + 10
-                    cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
-                    cv2.putText(frame, text, (startX, y),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 0), 2)
+                preds = recognizer.predict_proba(vec)[0]
+                j = np.argmax(preds)
+                proba = preds[j]
+                name = le.classes_[j]
 
-            ret, buffer = cv2.imencode('.jpg', frame)
-            frame = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                text = f"{name}: {proba * 100:.2f}%"
+                y = startY - 10 if startY - 10 > 10 else startY + 10
+                cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+                cv2.putText(frame, text, (startX, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 0), 2)
+
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame = buffer.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
 
 @app.route('/')
 def index():
     return '''
-    <h2>Face Recognition Live Feed</h2>
-    <img src="/video_feed">
+        <h2>Face Recognition Live Feed</h2>
+        <img src="/video_feed">
     '''
 
 @app.route('/video_feed')
 def video_feed():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-if __name__ == "__main__":
-    app.run(debug=True)
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
