@@ -1,1 +1,0 @@
-# CV_face_attend_recognition
